@@ -5,9 +5,22 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0"
+async-trait = "0.1"
+axum = { version = "0.7", features = ["json"] }
+codex-app-server-protocol = { path = "codex/codex-rs/app-server-protocol" }
+codex-core = { path = "codex/codex-rs/core" }
+codex-common = { path = "codex/codex-rs/common" }
+codex-otel = { path = "codex/codex-rs/otel" }
+codex-protocol = { path = "codex/codex-rs/protocol" }
+futures-util = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.39", features = ["macros", "rt-multi-thread", "signal", "net"] }
+tokio-stream = "0.1"
+tower = { version = "0.5", features = ["util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tokio = { version = "1.39", features = ["macros", "rt-multi-thread"] }
