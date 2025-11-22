@@ -1,13 +1,13 @@
 use crate::error::ApiError;
-use codex_core::{ContentItem, JsonSchema, Prompt, ResponsesApiTool, ResponseItem, ToolSpec};
+use codex_core::{ContentItem, JsonSchema, Prompt, ResponseItem, ResponsesApiTool, ToolSpec};
 use codex_protocol::models::FunctionCallOutputPayload;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
-use std::sync::OnceLock;
 use tracing::{info, warn};
 
 use super::sanitize_json_schema;
+use crate::serve_config::verbose_logging_enabled;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ChatCompletionRequest {
@@ -80,6 +80,7 @@ pub struct PromptPayload {
     pub model: String,
     pub prompt: Prompt,
     pub first_user_message: Option<String>,
+    pub system_prompt: Option<String>,
 }
 
 impl ChatCompletionRequest {
@@ -91,7 +92,9 @@ impl ChatCompletionRequest {
         let model = normalize_model(self.model);
         let mut prompt = Prompt::default();
         let mut first_user = None;
+        let mut system_segments: Vec<String> = Vec::new();
         for message in self.messages {
+            let original_role = message.role.clone();
             let role = normalize_role(&message.role);
 
             if role == "tool" {
@@ -107,6 +110,11 @@ impl ChatCompletionRequest {
             }
 
             let content = convert_content(&role, message.content)?;
+            if original_role.trim().eq_ignore_ascii_case("system")
+                && let Some(text) = plain_text_from_content(&content)
+            {
+                system_segments.push(text);
+            }
             if first_user.is_none() && role == "user" {
                 first_user = first_text(&content);
             }
@@ -127,14 +135,19 @@ impl ChatCompletionRequest {
             prompt.tools.extend(specs);
         }
 
-        if let Some(enabled) = self.parallel_tool_calls {
-            prompt.parallel_tool_calls = enabled;
-        }
+        prompt.parallel_tool_calls = self.parallel_tool_calls.unwrap_or(true);
+
+        let system_prompt = if system_segments.is_empty() {
+            None
+        } else {
+            Some(system_segments.join("\n\n"))
+        };
 
         Ok(PromptPayload {
             model,
             prompt,
             first_user_message: first_user,
+            system_prompt,
         })
     }
 }
@@ -262,6 +275,26 @@ fn first_text(content: &[ContentItem]) -> Option<String> {
         ContentItem::InputText { text } => Some(text.clone()),
         _ => None,
     })
+}
+
+fn plain_text_from_content(content: &[ContentItem]) -> Option<String> {
+    let mut parts = Vec::new();
+    for item in content {
+        match item {
+            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                if !text.trim().is_empty() {
+                    parts.push(text.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
 }
 
 fn convert_assistant_tool_calls(calls: Option<&Vec<ChatToolCall>>) -> Vec<ResponseItem> {
@@ -399,7 +432,7 @@ fn normalize_tool_schema(parameters: Option<Value>) -> Value {
 }
 
 fn log_function_tools(specs: &[ToolSpec]) {
-    if !tools_verbose_logging_enabled() || specs.is_empty() {
+    if !verbose_logging_enabled() || specs.is_empty() {
         return;
     }
     let payload: Vec<Value> = specs
@@ -437,19 +470,6 @@ fn log_function_tools(specs: &[ToolSpec]) {
         }
         Err(err) => info!("chat.tools serialization failed: {err}"),
     }
-}
-
-fn tools_verbose_logging_enabled() -> bool {
-    static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| {
-        matches!(
-            std::env::var("CODEX_SERVE_VERBOSE")
-                .unwrap_or_default()
-                .to_ascii_lowercase()
-                .as_str(),
-            "1" | "true" | "yes"
-        )
-    })
 }
 
 #[cfg(test)]
@@ -594,5 +614,30 @@ mod tests {
             }
             other => panic!("expected function tool, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn captures_original_system_prompt_text() {
+        let request = ChatCompletionRequest {
+            model: "gpt".to_string(),
+            messages: vec![
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: Value::String("stay on topic".to_string()),
+                    ..Default::default()
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: Value::String("hello".to_string()),
+                    ..Default::default()
+                },
+            ],
+            stream: false,
+            tools: Vec::new(),
+            parallel_tool_calls: None,
+        };
+
+        let payload = request.into_prompt().expect("payload");
+        assert_eq!(payload.system_prompt.as_deref(), Some("stay on topic"));
     }
 }

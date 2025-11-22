@@ -1,4 +1,4 @@
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 /// Sanitize a JSON Schema so it fits within the subset that codex-core accepts.
 /// - Recursively ensures every nested schema object has a `type`.
@@ -38,18 +38,18 @@ fn sanitize_object_schema(map: &mut Map<String, Value>) {
         .get("type")
         .and_then(|value| value.as_str())
         .map(str::to_string);
-    if schema_type.is_none() {
-        if let Some(Value::Array(types)) = map.get("type") {
-            for t in types {
-                if let Some(candidate) = t.as_str() {
-                    if matches!(
-                        candidate,
-                        "object" | "array" | "string" | "number" | "integer" | "boolean"
-                    ) {
-                        schema_type = Some(candidate.to_string());
-                        break;
-                    }
-                }
+    if schema_type.is_none()
+        && let Some(Value::Array(types)) = map.get("type")
+    {
+        for t in types {
+            if let Some(candidate) = t.as_str()
+                && matches!(
+                    candidate,
+                    "object" | "array" | "string" | "number" | "integer" | "boolean"
+                )
+            {
+                schema_type = Some(candidate.to_string());
+                break;
             }
         }
     }
@@ -84,10 +84,10 @@ fn sanitize_object_schema(map: &mut Map<String, Value>) {
         if !map.contains_key("properties") {
             map.insert("properties".to_string(), Value::Object(Map::new()));
         }
-        if let Some(additional) = map.get_mut("additionalProperties") {
-            if !additional.is_boolean() {
-                sanitize_json_schema(additional);
-            }
+        if let Some(additional) = map.get_mut("additionalProperties")
+            && !additional.is_boolean()
+        {
+            sanitize_json_schema(additional);
         }
     }
 
@@ -105,7 +105,10 @@ mod tests {
         let mut value = json!({ "properties": { "x": { "minimum": 0 } } });
         sanitize_json_schema(&mut value);
         assert_eq!(value["type"], Value::String("object".into()));
-        assert_eq!(value["properties"]["x"]["type"], Value::String("number".into()));
+        assert_eq!(
+            value["properties"]["x"]["type"],
+            Value::String("number".into())
+        );
     }
 
     #[test]

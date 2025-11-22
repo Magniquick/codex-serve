@@ -9,7 +9,7 @@ Codex Serve is a tiny bridge that lets any OpenAI-compatible client talk to the 
 - **Extensible routing.** Besides `/v1/chat/completions`, the server exposes `/v1/models`, `/healthz`, a tiny `/api/version`, and a couple of compatibility shims used by local testing tools.
 
 ## Architecture snapshot
-1. **Tokio + Axum core.** The binary binds to `CODEX_SERVE_ADDR` (default `127.0.0.1:8000`) and wires routes through `tower-http` middleware for logging and CORS.
+1. **Tokio + Axum core.** The binary binds to the `--addr` value (default `127.0.0.1:8000`) and wires routes through `tower-http` middleware for logging and CORS.
 2. **Codex Adapter.** OpenAI-flavored requests are converted into `codex_core::Prompt`s, then executed via `SharedChatExecutor`, which in turn talks to the Codex CLI backend over the local IPC transport.
 3. **Streaming fan-out.** `ResponseEvent`s from Codex are folded into OpenAI JSON chunks, surfaced as standard SSE events when `stream: true` is requested, or accumulated into a single JSON payload otherwise.
 4. **State + Auth.** `AppState` calls into the Codex auth subsystem; if the CLI isn’t logged in, the HTTP handler returns a friendly `401` with an OpenAI-style error body.
@@ -17,7 +17,7 @@ Codex Serve is a tiny bridge that lets any OpenAI-compatible client talk to the 
 
 ## Endpoints
 - `POST /v1/chat/completions` – main entry point; supports streaming and tool calls.
-- `GET /v1/models` – lists Codex model IDs derived from `codex-core` presets (toggle reasoning variants with `CODEX_SERVE_EXPOSE_REASONING_MODELS`).
+- `GET /v1/models` – lists Codex model IDs derived from `codex-core` presets (toggle reasoning variants with `--expose-reasoning-models`).
 - `GET /healthz` – returns readiness plus whether Codex auth is available.
 - `GET /api/version`, `GET /api/tags`, `POST /api/show` – small compatibility helpers mirrored from the Codex CLI ChatMock tooling.
 
@@ -53,15 +53,20 @@ If Codex is logged in, you’ll receive a valid OpenAI-style completion like -
 ```
 If not, you (should) be gently nudged toward `codex login`.
 
-## Configuration knobs 
-> Will be moved into command line flags later.
+## Command-line flags
 
-| Variable | Default | Purpose |
+Run `codex-serve --help` (or `cargo run -- --help`) to see the complete CLI surface.
+
+| Flag | Default | Purpose |
 | --- | --- | --- |
-| `CODEX_SERVE_ADDR` | `127.0.0.1:8000` | Address the server binds to (set to `0.0.0.0:8080` to accept LAN traffic). |
-| `CODEX_SERVE_VERBOSE` | unset | When `true/1/yes`, echo every request, response, and streamed chunk via `tracing` logs. |
-| `CODEX_SERVE_EXPOSE_REASONING_MODELS` | unset | When enabled, include reasoning-tier Codex models in `/v1/models`. |
-| `RUST_LOG` | `info` | Usual `tracing_subscriber` filter; handy for enabling `debug` on specific modules. |
+| `--addr <ADDR>` | `127.0.0.1:8000` | Listen address for the HTTP server (use `0.0.0.0:8080` to expose on LAN). |
+| `--verbose` | unset | Echo payloads/streaming chunks via `tracing` for debugging. |
+| `--expose-reasoning-models` | unset | Include reasoning-tier Codex models in `/v1/models`. |
+| `--web-search-request <BOOL>` | unset | Override `features.web_search_request` in `config.toml` (accepts true/false/yes/no/1/0). |
+| `--developer-prompt-mode <none|default|override>` | `default` | Control whether Codex Serve injects its compatibility instructions (`default` adds them only when the user omitted a system prompt, `override` always prepends them while appending the original text, `none` disables the helper). |
+| `RUST_LOG` | `info` | Standard `tracing_subscriber` filter; useful for module-level debug. |
+
+> Tip: to exercise Codex’s web search tool locally, pass `--web-search-request true`.
 
 ## Observability & errors
 - All handlers emit structured logs; set the logging env vars to see per-route spans.

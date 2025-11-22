@@ -6,15 +6,17 @@ use codex_core::{
     config::{Config, ConfigOverrides, find_codex_home},
 };
 
-use crate::error::ApiError;
+use crate::{error::ApiError, serve_config::web_search_request_override};
 
 use super::executor::{MockChatExecutor, RealChatExecutor, SharedChatExecutor};
+use toml::Value as TomlValue;
 
 /// Shared application state for the Axum router.
 #[derive(Clone)]
 pub struct AppState {
     auth: AuthController,
     engine: SharedChatExecutor,
+    web_search_enabled: bool,
 }
 
 impl AppState {
@@ -25,18 +27,29 @@ impl AppState {
         let auth_manager =
             AuthManager::shared(codex_home.clone(), true, AuthCredentialsStoreMode::File);
 
+        let mut cli_overrides = Vec::new();
+        if let Some(flag) = web_search_request_override() {
+            cli_overrides.push((
+                "features.web_search_request".to_string(),
+                TomlValue::Boolean(flag),
+            ));
+        }
         let config =
-            Config::load_with_cli_overrides(Vec::new(), ConfigOverrides::default()).await?;
+            Config::load_with_cli_overrides(cli_overrides.clone(), ConfigOverrides::default())
+                .await?;
+        let web_search_enabled = config.tools_web_search_request;
         let config = Arc::new(config);
 
         let engine = Arc::new(RealChatExecutor::new(
             Arc::clone(&config),
             Arc::clone(&auth_manager),
+            cli_overrides,
         ));
 
         Ok(Self {
             auth: AuthController::Real(auth_manager),
             engine,
+            web_search_enabled,
         })
     }
 
@@ -45,6 +58,7 @@ impl AppState {
         Self {
             auth: AuthController::Mock { authenticated },
             engine: Arc::new(MockChatExecutor::new()),
+            web_search_enabled: false,
         }
     }
 
@@ -65,6 +79,10 @@ impl AppState {
 
     pub fn auth(&self) -> &AuthController {
         &self.auth
+    }
+
+    pub fn web_search_enabled(&self) -> bool {
+        self.web_search_enabled
     }
 }
 
