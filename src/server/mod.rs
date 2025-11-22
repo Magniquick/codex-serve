@@ -3,7 +3,10 @@ pub mod response;
 mod state;
 mod test_server;
 
-use std::{collections::HashMap, convert::Infallible, sync::OnceLock};
+use std::{
+    collections::{HashMap, HashSet},
+    convert::Infallible,
+};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -26,11 +29,18 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use codex_common::model_presets::builtin_model_presets;
-use codex_core::{ResponseEvent, ResponseItem, compact::content_items_to_text};
+use codex_common::model_presets::{ModelPreset, builtin_model_presets};
+use codex_core::{
+    ResponseEvent, ResponseItem, compact::content_items_to_text,
+    protocol_config_types::ReasoningEffort,
+};
 use codex_protocol::models::WebSearchAction;
 
-use crate::{error::ApiError, openai::chat::ChatCompletionRequest};
+use crate::{
+    error::ApiError,
+    openai::chat::ChatCompletionRequest,
+    serve_config::{developer_prompt_mode, expose_reasoning_models, verbose_logging_enabled},
+};
 use executor::{SharedChatExecutor, StreamingHandle};
 use response::{ToolCall, Usage};
 use state::AppState;
@@ -100,6 +110,15 @@ struct HealthzResponse {
     ok: bool,
     authenticated: bool,
     message: String,
+    config: HealthzConfig,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct HealthzConfig {
+    expose_reasoning_models: bool,
+    web_search_request: bool,
+    developer_prompt_mode: String,
+    models: Vec<String>,
 }
 
 async fn healthz(State(state): State<AppState>) -> Json<HealthzResponse> {
@@ -109,10 +128,18 @@ async fn healthz(State(state): State<AppState>) -> Json<HealthzResponse> {
     } else {
         "Codex auth missing; run `codex login`".to_string()
     };
+    let expose_reasoning = expose_reasoning_models();
+    let config = HealthzConfig {
+        expose_reasoning_models: expose_reasoning,
+        web_search_request: state.web_search_enabled(),
+        developer_prompt_mode: developer_prompt_mode().to_string(),
+        models: codex_model_ids(expose_reasoning),
+    };
     Json(HealthzResponse {
         ok: true,
         authenticated,
         message,
+        config,
     })
 }
 
@@ -129,7 +156,8 @@ struct ModelEntry {
 }
 
 async fn list_models() -> Json<ModelsResponse> {
-    let data = codex_model_ids()
+    let include_reasoning = expose_reasoning_models();
+    let data = codex_model_ids(include_reasoning)
         .into_iter()
         .map(|id| ModelEntry {
             id,
@@ -202,30 +230,13 @@ const OLLAMA_MODEL_METADATA: OllamaModelMetadata = OllamaModelMetadata {
     },
 };
 
-const OLLAMA_VARIANT_MODEL_IDS: &[&str] = &[
-    "gpt-5-high",
-    "gpt-5-medium",
-    "gpt-5-low",
-    "gpt-5-minimal",
-    "gpt-5-codex-high",
-    "gpt-5-codex-medium",
-    "gpt-5-codex-low",
-];
-
 #[derive(Debug, Deserialize)]
 struct OllamaShowRequest {
     model: Option<String>,
 }
 
 async fn api_tags() -> Json<OllamaTagsResponse> {
-    let mut models = codex_model_ids();
-    if expose_reasoning_variants() {
-        models.extend(
-            OLLAMA_VARIANT_MODEL_IDS
-                .iter()
-                .map(|model| (*model).to_string()),
-        );
-    }
+    let models = codex_model_ids(expose_reasoning_models());
     let entries = models
         .iter()
         .map(|model_id| build_ollama_entry(model_id))
@@ -244,21 +255,42 @@ fn build_ollama_entry(model_id: &str) -> OllamaModelEntry {
     }
 }
 
-fn codex_model_ids() -> Vec<String> {
-    builtin_model_presets(None)
-        .into_iter()
-        .map(|preset| preset.model.to_string())
+fn codex_model_ids(include_reasoning_variants: bool) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut models = Vec::new();
+
+    for preset in builtin_model_presets(None) {
+        push_unique_model(&mut models, &mut seen, preset.model.to_string());
+        if include_reasoning_variants {
+            for variant in reasoning_variants_for_preset(&preset) {
+                push_unique_model(&mut models, &mut seen, variant);
+            }
+        }
+    }
+
+    models
+}
+
+fn push_unique_model(models: &mut Vec<String>, seen: &mut HashSet<String>, value: String) {
+    if seen.insert(value.clone()) {
+        models.push(value);
+    }
+}
+
+fn reasoning_variants_for_preset(preset: &ModelPreset) -> Vec<String> {
+    preset
+        .supported_reasoning_efforts
+        .iter()
+        .filter_map(|effort| reasoning_suffix(effort.effort))
+        .map(|suffix| format!("{}-{}", preset.model, suffix))
         .collect()
 }
 
-fn expose_reasoning_variants() -> bool {
-    matches!(
-        std::env::var("CODEX_SERVE_EXPOSE_REASONING_MODELS")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "true" | "yes"
-    )
+fn reasoning_suffix(effort: ReasoningEffort) -> Option<String> {
+    if matches!(effort, ReasoningEffort::None | ReasoningEffort::Minimal) {
+        return None;
+    }
+    Some(effort.to_string())
 }
 
 fn log_verbose_json<T>(event: &str, value: &T)
@@ -279,6 +311,7 @@ fn log_verbose_stream_response(
     response_id: &str,
     text: Option<String>,
     reasoning_summary: Option<String>,
+    reasoning_content: Option<String>,
     tool_calls: Vec<ToolCall>,
     usage: &Usage,
 ) {
@@ -287,23 +320,11 @@ fn log_verbose_stream_response(
         "response_id": response_id,
         "text": text,
         "reasoning_summary": reasoning_summary,
+        "reasoning_content": reasoning_content,
         "tool_calls": if tool_calls.is_empty() { Value::Null } else { serde_json::to_value(tool_calls).unwrap_or(Value::Null) },
         "usage": usage,
     });
     log_verbose_json("chat.stream.response", &payload);
-}
-
-fn verbose_logging_enabled() -> bool {
-    static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| {
-        matches!(
-            std::env::var("CODEX_SERVE_VERBOSE")
-                .unwrap_or_default()
-                .to_ascii_lowercase()
-                .as_str(),
-            "1" | "true" | "yes"
-        )
-    })
 }
 
 pub(super) fn tool_call_from_item(item: &ResponseItem) -> Option<ToolCall> {
@@ -338,7 +359,36 @@ pub(super) fn tool_call_from_item(item: &ResponseItem) -> Option<ToolCall> {
 
 fn web_search_arguments(action: &WebSearchAction) -> String {
     match action {
-        WebSearchAction::Search { query } => json!({ "query": query }).to_string(),
+        WebSearchAction::Search { query } => {
+            let mut payload = Map::new();
+            payload.insert("type".to_string(), Value::String("search".to_string()));
+            if let Some(query) = query {
+                payload.insert("query".to_string(), Value::String(query.clone()));
+            }
+            Value::Object(payload).to_string()
+        }
+        WebSearchAction::OpenPage { url } => {
+            let mut payload = Map::new();
+            payload.insert("type".to_string(), Value::String("open_page".to_string()));
+            if let Some(url) = url {
+                payload.insert("url".to_string(), Value::String(url.clone()));
+            }
+            Value::Object(payload).to_string()
+        }
+        WebSearchAction::FindInPage { url, pattern } => {
+            let mut payload = Map::new();
+            payload.insert(
+                "type".to_string(),
+                Value::String("find_in_page".to_string()),
+            );
+            if let Some(url) = url {
+                payload.insert("url".to_string(), Value::String(url.clone()));
+            }
+            if let Some(pattern) = pattern {
+                payload.insert("pattern".to_string(), Value::String(pattern.clone()));
+            }
+            Value::Object(payload).to_string()
+        }
         WebSearchAction::Other => json!({}).to_string(),
     }
 }
@@ -420,7 +470,7 @@ async fn api_show(Json(payload): Json<OllamaShowRequest>) -> Response {
 }
 
 fn build_ollama_show_payload() -> Value {
-    let details = serde_json::to_value(&OLLAMA_MODEL_METADATA.details)
+    let details = serde_json::to_value(OLLAMA_MODEL_METADATA.details)
         .expect("static model details should serialize");
     json!({
         "modelfile": OLLAMA_SHOW_MODELFILE,
@@ -466,16 +516,17 @@ async fn forward_sse_events(
         response_model,
     } = handle;
     let created = current_timestamp();
-    let mut response_id = "resp_stream".to_string();
+    let mut stream_response_id = "resp_stream".to_string();
     let mut sent_role = false;
     let mut usage = Usage::default();
     let verbose_enabled = verbose_logging_enabled();
     let mut verbose_text = verbose_enabled.then(String::new);
-    let mut text_emitted = false;
     let mut text_deltas_since_last_message = false;
-    let mut reasoning_summary = verbose_enabled.then(String::new);
+    let mut verbose_reasoning_summary = verbose_enabled.then(String::new);
+    let mut reasoning_content = verbose_enabled.then(String::new);
     let mut streamed_tool_calls: Vec<ToolCall> = Vec::new();
     let mut tool_call_indices: HashMap<String, usize> = HashMap::new();
+    let mut tool_call_arg_progress: HashMap<String, usize> = HashMap::new();
     let mut next_tool_index = 0usize;
 
     while let Some(event) = FuturesStreamExt::next(&mut stream).await {
@@ -491,9 +542,8 @@ async fn forward_sse_events(
                 if let Some(buffer) = verbose_text.as_mut() {
                     buffer.push_str(&delta);
                 }
-                text_emitted = true;
                 let chunk = chunk_event(
-                    &response_id,
+                    &stream_response_id,
                     created,
                     &response_model,
                     Value::Object(delta_obj),
@@ -511,12 +561,13 @@ async fn forward_sse_events(
                 if forward_tool_call_chunk(
                     &item,
                     &tx,
-                    &response_id,
+                    &stream_response_id,
                     created,
                     &response_model,
                     &mut tool_call_indices,
                     &mut next_tool_index,
                     &mut streamed_tool_calls,
+                    &mut tool_call_arg_progress,
                     verbose_enabled,
                 )
                 .await
@@ -526,34 +577,31 @@ async fn forward_sse_events(
             }
             Ok(ResponseEvent::OutputItemDone(item)) => {
                 if let ResponseItem::Message { role, content, .. } = &item {
-                    if role == "assistant" && !text_deltas_since_last_message {
-                        if let Some(text) =
+                    if role == "assistant"
+                        && !text_deltas_since_last_message
+                        && let Some(text) =
                             content_items_to_text(content).filter(|text| !text.trim().is_empty())
-                        {
-                            if let Some(buffer) = verbose_text.as_mut() {
-                                buffer.push_str(&text);
-                            }
-                            text_emitted = true;
-                            let mut delta_obj = Map::new();
-                            if !sent_role {
-                                delta_obj.insert(
-                                    "role".to_string(),
-                                    Value::String("assistant".to_string()),
-                                );
-                                sent_role = true;
-                            }
-                            delta_obj.insert("content".to_string(), Value::String(text));
-                            let chunk = chunk_event(
-                                &response_id,
-                                created,
-                                &response_model,
-                                Value::Object(delta_obj),
-                                None,
-                                None,
-                            );
-                            if tx.send(Ok(chunk)).await.is_err() {
-                                break;
-                            }
+                    {
+                        if let Some(buffer) = verbose_text.as_mut() {
+                            buffer.push_str(&text);
+                        }
+                        let mut delta_obj = Map::new();
+                        if !sent_role {
+                            delta_obj
+                                .insert("role".to_string(), Value::String("assistant".to_string()));
+                            sent_role = true;
+                        }
+                        delta_obj.insert("content".to_string(), Value::String(text));
+                        let chunk = chunk_event(
+                            &stream_response_id,
+                            created,
+                            &response_model,
+                            Value::Object(delta_obj),
+                            None,
+                            None,
+                        );
+                        if tx.send(Ok(chunk)).await.is_err() {
+                            break;
                         }
                     }
                     text_deltas_since_last_message = false;
@@ -562,12 +610,13 @@ async fn forward_sse_events(
                 if forward_tool_call_chunk(
                     &item,
                     &tx,
-                    &response_id,
+                    &stream_response_id,
                     created,
                     &response_model,
                     &mut tool_call_indices,
                     &mut next_tool_index,
                     &mut streamed_tool_calls,
+                    &mut tool_call_arg_progress,
                     verbose_enabled,
                 )
                 .await
@@ -576,32 +625,70 @@ async fn forward_sse_events(
                 }
             }
             Ok(ResponseEvent::ReasoningSummaryDelta { delta, .. }) => {
-                if let Some(buffer) = reasoning_summary.as_mut() {
+                if let Some(buffer) = verbose_reasoning_summary.as_mut() {
                     buffer.push_str(&delta);
+                }
+                let chunk = chunk_event(
+                    &stream_response_id,
+                    created,
+                    &response_model,
+                    json!({
+                        "reasoning": {
+                            "summary": [{
+                                "type": "text",
+                                "text": delta
+                            }]
+                        }
+                    }),
+                    None,
+                    None,
+                );
+                if tx.send(Ok(chunk)).await.is_err() {
+                    break;
                 }
             }
             Ok(ResponseEvent::ReasoningSummaryPartAdded { .. }) => {
-                if let Some(buffer) = reasoning_summary.as_mut() {
-                    if !buffer.is_empty() {
-                        buffer.push('\n');
-                    }
+                if let Some(buffer) = verbose_reasoning_summary.as_mut()
+                    && !buffer.is_empty()
+                {
+                    buffer.push('\n');
+                }
+            }
+            Ok(ResponseEvent::ReasoningContentDelta { delta, .. }) => {
+                if let Some(buffer) = reasoning_content.as_mut() {
+                    buffer.push_str(&delta);
+                }
+                let chunk = chunk_event(
+                    &stream_response_id,
+                    created,
+                    &response_model,
+                    json!({
+                        "reasoning": {
+                            "content": [{"type": "text", "text": delta}]
+                        }
+                    }),
+                    None,
+                    None,
+                );
+                if tx.send(Ok(chunk)).await.is_err() {
+                    break;
                 }
             }
             Ok(ResponseEvent::Completed {
                 response_id: rid,
                 token_usage,
             }) => {
-                response_id = rid;
+                stream_response_id = rid.clone();
                 if let Some(tokens) = token_usage {
                     usage = Usage::from(tokens);
                 }
-                let finish_reason = if !streamed_tool_calls.is_empty() && !text_emitted {
+                let finish_reason = if !streamed_tool_calls.is_empty() {
                     Some("tool_calls")
                 } else {
                     Some("stop")
                 };
                 let chunk = chunk_event(
-                    &response_id,
+                    &stream_response_id,
                     created,
                     &response_model,
                     json!({}),
@@ -610,16 +697,19 @@ async fn forward_sse_events(
                 );
                 let _ = tx.send(Ok(chunk)).await;
                 let text_snapshot = verbose_text.take();
-                let reasoning_snapshot = reasoning_summary.take();
+                let reasoning_snapshot = verbose_reasoning_summary.take();
+                let reasoning_content_snapshot = reasoning_content.take();
                 if text_snapshot.is_some()
                     || reasoning_snapshot.is_some()
+                    || reasoning_content_snapshot.is_some()
                     || !streamed_tool_calls.is_empty()
                 {
                     log_verbose_stream_response(
                         &response_model,
-                        &response_id,
+                        &stream_response_id,
                         text_snapshot,
                         reasoning_snapshot,
+                        reasoning_content_snapshot,
                         streamed_tool_calls.clone(),
                         &usage,
                     );
@@ -627,12 +717,9 @@ async fn forward_sse_events(
                 break;
             }
             Ok(ResponseEvent::RateLimits(_)) | Ok(ResponseEvent::Created) => {}
-            Ok(other) => {
-                warn!("Unhandled Codex stream event: {other:?}");
-            }
             Err(err) => {
                 let chunk = chunk_event(
-                    &response_id,
+                    &stream_response_id,
                     created,
                     &response_model,
                     json!({}),
@@ -659,6 +746,7 @@ async fn forward_tool_call_chunk(
     tool_call_indices: &mut HashMap<String, usize>,
     next_tool_index: &mut usize,
     streamed_tool_calls: &mut Vec<ToolCall>,
+    tool_call_arg_progress: &mut HashMap<String, usize>,
     verbose_enabled: bool,
 ) -> bool {
     if matches!(item, ResponseItem::Reasoning { .. }) {
@@ -673,7 +761,16 @@ async fn forward_tool_call_chunk(
         let index = *tool_call_indices
             .get(&call.id)
             .expect("tool index should exist");
-        let chunk = tool_call_delta_chunk(response_id, created, response_model, &call, index);
+        let full_arguments = call.function.arguments.clone();
+        let prev_len = tool_call_arg_progress.get(&call.id).copied().unwrap_or(0);
+        if full_arguments.len() <= prev_len {
+            return false;
+        }
+        let delta = full_arguments[prev_len..].to_string();
+        tool_call_arg_progress.insert(call.id.clone(), full_arguments.len());
+        let mut delta_call = call.clone();
+        delta_call.function.arguments = delta;
+        let chunk = tool_call_delta_chunk(response_id, created, response_model, &delta_call, index);
         if tx.send(Ok(chunk)).await.is_err() {
             return true;
         }

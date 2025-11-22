@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::{collections::HashSet, sync::Arc};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use codex_app_server_protocol::AuthMode;
@@ -15,12 +15,15 @@ use codex_protocol::ConversationId;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::RwLock;
+use toml::Value as TomlValue;
 use tracing::{error, warn};
 
 use crate::{
     error::ApiError,
     openai::chat::PromptPayload,
-    server::response::{ChatCompletionResponse, ToolCall, Usage},
+    prompt::{ensure_web_search_tool, inject_developer_prompt},
+    serve_config::developer_prompt_mode,
+    server::response::{AssistantReasoning, ChatCompletionResponse, ToolCall, Usage},
 };
 
 pub type SharedChatExecutor = Arc<dyn ChatExecutor + Send + Sync>;
@@ -72,14 +75,20 @@ pub struct RealChatExecutor {
     config: Arc<Config>,
     auth_manager: Arc<AuthManager>,
     config_cache: RwLock<HashMap<String, Arc<Config>>>,
+    cli_overrides: Vec<(String, TomlValue)>,
 }
 
 impl RealChatExecutor {
-    pub fn new(config: Arc<Config>, auth_manager: Arc<AuthManager>) -> Self {
+    pub fn new(
+        config: Arc<Config>,
+        auth_manager: Arc<AuthManager>,
+        cli_overrides: Vec<(String, TomlValue)>,
+    ) -> Self {
         Self {
             config,
             auth_manager,
             config_cache: RwLock::new(HashMap::new()),
+            cli_overrides,
         }
     }
 
@@ -102,7 +111,7 @@ impl RealChatExecutor {
             ..ConfigOverrides::default()
         };
 
-        let config = Config::load_with_cli_overrides(Vec::new(), overrides)
+        let config = Config::load_with_cli_overrides(self.cli_overrides.clone(), overrides)
             .await
             .map_err(|_| {
                 ApiError::bad_request(format!(
@@ -132,7 +141,21 @@ impl ChatExecutor for RealChatExecutor {
     async fn stream(&self, payload: PromptPayload) -> Result<StreamingHandle, ApiError> {
         let config = self.config_for_model(&payload.model).await?;
 
-        let PromptPayload { model, prompt, .. } = payload;
+        let PromptPayload {
+            model,
+            mut prompt,
+            system_prompt,
+            ..
+        } = payload;
+
+        let has_web_search = ensure_web_search_tool(&mut prompt, config.tools_web_search_request);
+        let prompt_mode = developer_prompt_mode();
+        inject_developer_prompt(
+            &mut prompt,
+            has_web_search,
+            system_prompt.as_deref(),
+            prompt_mode,
+        );
 
         let conversation_id = ConversationId::default();
         let auth_snapshot = self.auth_snapshot();
@@ -187,7 +210,8 @@ async fn aggregate_response_stream(
     let mut response_id: Option<String> = None;
     let mut usage = Usage::default();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
-    let mut tool_call_ids: HashSet<String> = HashSet::new();
+    let mut tool_call_indices: HashMap<String, usize> = HashMap::new();
+    let mut reasoning_summary_parts: BTreeMap<i64, String> = BTreeMap::new();
 
     while let Some(event) = handle.stream.next().await {
         let event =
@@ -202,13 +226,31 @@ async fn aggregate_response_stream(
                     final_text = Some(text);
                 }
                 if let Some(call) = super::tool_call_from_item(&item) {
-                    if tool_call_ids.insert(call.id.clone()) {
+                    if let Some(idx) = tool_call_indices.get(&call.id) {
+                        if let Some(existing) = tool_calls.get_mut(*idx) {
+                            *existing = call;
+                        }
+                    } else {
+                        let idx = tool_calls.len();
+                        tool_call_indices.insert(call.id.clone(), idx);
                         tool_calls.push(call);
                     }
                 }
             }
-            ResponseEvent::ReasoningSummaryDelta { .. }
-            | ResponseEvent::ReasoningSummaryPartAdded { .. } => {}
+            ResponseEvent::ReasoningSummaryDelta {
+                delta,
+                summary_index,
+            } => {
+                reasoning_summary_parts
+                    .entry(summary_index)
+                    .or_default()
+                    .push_str(&delta);
+            }
+            ResponseEvent::ReasoningSummaryPartAdded { summary_index } => {
+                reasoning_summary_parts
+                    .entry(summary_index)
+                    .or_default();
+            }
             ResponseEvent::Completed {
                 response_id: rid,
                 token_usage,
@@ -219,7 +261,7 @@ async fn aggregate_response_stream(
                 }
                 break;
             }
-            ResponseEvent::RateLimits(_) => {}
+            ResponseEvent::RateLimits(_) | ResponseEvent::Created => {}
             other => {
                 warn!("Unhandled Codex response event in aggregation: {other:?}");
             }
@@ -227,31 +269,27 @@ async fn aggregate_response_stream(
     }
 
     let response_id = response_id.unwrap_or_else(|| "resp_local".to_string());
-    let mut content = final_text
-        .or_else(|| {
-            if streamed_text.trim().is_empty() {
-                None
-            } else {
-                Some(streamed_text)
-            }
-        })
-        .or_else(|| {
-            if tool_calls.is_empty() {
-                Some("Codex response did not contain assistant text".to_string())
-            } else {
-                None
-            }
-        });
+    let mut content = final_text.or_else(|| {
+        if streamed_text.trim().is_empty() {
+            None
+        } else {
+            Some(streamed_text)
+        }
+    });
     // ensure we don't return empty string content
     if content.as_ref().is_some_and(|text| text.trim().is_empty()) {
         content = None;
     }
 
-    let finish_reason = if !tool_calls.is_empty() && content.is_none() {
+    let finish_reason = if !tool_calls.is_empty() {
         "tool_calls"
     } else {
         "stop"
     };
+    let reasoning_summary = reasoning_summary_parts.into_values()
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>();
+    let reasoning = AssistantReasoning::from_summary_parts(reasoning_summary);
 
     Ok(ChatCompletionResponse::with_metadata(
         handle.response_model,
@@ -260,6 +298,7 @@ async fn aggregate_response_stream(
         finish_reason,
         response_id,
         usage,
+        reasoning,
     ))
 }
 

@@ -27,6 +27,8 @@ struct AssistantMessage {
     content: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     tool_calls: Vec<ToolCall>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<AssistantReasoning>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -41,6 +43,21 @@ pub struct ToolCall {
 pub struct ToolCallFunction {
     pub name: String,
     pub arguments: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct AssistantReasoning {
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    summary: Vec<ReasoningTracePart>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    content: Vec<ReasoningTracePart>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct ReasoningTracePart {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    text: String,
 }
 
 /// Token accounting compatible with OpenAI responses.
@@ -74,6 +91,7 @@ impl ChatCompletionResponse {
             "stop",
             "resp_stub".to_string(),
             Usage::default(),
+            None,
         )
     }
 
@@ -84,6 +102,7 @@ impl ChatCompletionResponse {
         finish_reason: &'static str,
         response_id: String,
         usage: Usage,
+        reasoning: Option<AssistantReasoning>,
     ) -> Self {
         let created = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -102,6 +121,7 @@ impl ChatCompletionResponse {
                     role: "assistant",
                     content,
                     tool_calls,
+                    reasoning,
                 },
             }],
             usage,
@@ -116,5 +136,31 @@ impl ToolCall {
             call_type: "function",
             function: ToolCallFunction { name, arguments },
         }
+    }
+}
+
+impl AssistantReasoning {
+    pub fn from_summary_parts(parts: Vec<String>) -> Option<Self> {
+        if parts.is_empty() {
+            return None;
+        }
+        let summary = parts
+            .into_iter()
+            .filter(|text| !text.trim().is_empty())
+            .map(ReasoningTracePart::new)
+            .collect::<Vec<_>>();
+        if summary.is_empty() {
+            return None;
+        }
+        Some(Self {
+            summary,
+            content: Vec::new(),
+        })
+    }
+}
+
+impl ReasoningTracePart {
+    fn new(text: String) -> Self {
+        Self { kind: "text", text }
     }
 }
