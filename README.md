@@ -62,11 +62,13 @@ Run `codex-serve --help` (or `cargo run -- --help`) to see the complete CLI surf
 | `--addr <ADDR>` | `127.0.0.1:8000` | Listen address for the HTTP server (use `0.0.0.0:8080` to expose on LAN). |
 | `--verbose` | unset | Echo payloads/streaming chunks via `tracing` for debugging. |
 | `--expose-reasoning-models` | unset | Include reasoning-tier Codex models in `/v1/models`. |
-| `--web-search-request <BOOL>` | unset | Override `features.web_search_request` in `config.toml` (accepts true/false/yes/no/1/0). |
-| `--developer-prompt-mode <none|default|override>` | `default` | Control whether Codex Serve injects its compatibility instructions (`default` adds them only when the user omitted a system prompt, `override` always prepends them while appending the original text, `none` disables the helper). |
+| `--web-search-request` | `false` | Enable the Codex `features.web_search_request` flag and expose the `web_search` tool (omitting the flag forces it off, even if `config.toml` enables it). |
+| `--developer-prompt-mode <none\|default\|override>` | `default` | Control whether Codex Serve injects its compatibility instructions (`default` adds them only when the user omitted a system prompt, `override` always prepends them while appending the original text, `none` disables the helper). |
 | `RUST_LOG` | `info` | Standard `tracing_subscriber` filter; useful for module-level debug. |
 
-> Tip: to exercise Codex’s web search tool locally, pass `--web-search-request true`.
+> Tip: to exercise Codex’s web search tool locally, pass `--web-search-request`.
+
+Web search is opt-in to keep the bridge offline by default. Add `--web-search-request` to expose the `web_search` tool and forward `features.web_search_request=true` to the Codex CLI; leave it off to force the feature disabled (even if your `config.toml` turns it on). The flag is a switch, so it does not accept `true/false` or `1/0` values. Check `/healthz` to confirm the effective `web_search_request` flag.
 
 ## Observability & errors
 - All handlers emit structured logs; set the logging env vars to see per-route spans.

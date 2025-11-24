@@ -718,7 +718,7 @@ checksum = "e9b18233253483ce2f65329a24072ec414db782531bdbb7d0bbc4bd2ce6b7e21"
 
 [[package]]
 name = "codex-app-server-protocol"
-version = "0.0.0"
+version = "0.63.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -735,7 +735,7 @@ dependencies = [
 
 [[package]]
 name = "codex-apply-patch"
-version = "0.0.0"
+version = "0.63.0"
 dependencies = [
  "anyhow",
  "similar",
@@ -746,7 +746,7 @@ dependencies = [
 
 [[package]]
 name = "codex-async-utils"
-version = "0.0.0"
+version = "0.63.0"
 dependencies = [
  "async-trait",
  "tokio",
@@ -755,7 +755,7 @@ dependencies = [
 
 [[package]]
 name = "codex-common"
-version = "0.0.0"
+version = "0.63.0"
 dependencies = [
  "codex-app-server-protocol",
  "codex-core",
@@ -767,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "codex-core"
-version = "0.0.0"
+version = "0.63.0"
 dependencies = [
  "anyhow",
  "askama",
@@ -804,11 +804,9 @@ dependencies = [
  "landlock",
  "libc",
  "mcp-types",
- "once_cell",
  "openssl-sys",
  "os_info",
  "rand 0.9.2",
- "regex",
  "regex-lite",
  "reqwest",
  "seccompiler",
@@ -831,7 +829,6 @@ dependencies = [
  "tracing",
  "tree-sitter",
  "tree-sitter-bash",
- "url",
  "uuid",
  "which",
  "wildmatch",
@@ -839,7 +836,7 @@ dependencies = [
 
 [[package]]
 name = "codex-execpolicy"
-version = "0.0.0"
+version = "0.63.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -853,7 +850,7 @@ dependencies = [
 
 [[package]]
 name = "codex-file-search"
-version = "0.0.0"
+version = "0.63.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -866,7 +863,7 @@ dependencies = [
 
 [[package]]
 name = "codex-git"
-version = "0.0.0"
+version = "0.63.0"
 dependencies = [
  "once_cell",
  "regex",
@@ -880,7 +877,7 @@ dependencies = [
 
 [[package]]
 name = "codex-keyring-store"
-version = "0.0.0"
+version = "0.63.0"
 dependencies = [
  "keyring",
  "tracing",
@@ -888,7 +885,7 @@ dependencies = [
 
 [[package]]
 name = "codex-lmstudio"
-version = "0.0.0"
+version = "0.63.0"
 dependencies = [
  "codex-core",
  "reqwest",
@@ -900,7 +897,7 @@ dependencies = [
 
 [[package]]
 name = "codex-ollama"
-version = "0.0.0"
+version = "0.63.0"
 dependencies = [
  "async-stream",
  "bytes",
@@ -915,7 +912,7 @@ dependencies = [
 
 [[package]]
 name = "codex-otel"
-version = "0.0.0"
+version = "0.63.0"
 dependencies = [
  "chrono",
  "codex-app-server-protocol",
@@ -937,7 +934,7 @@ dependencies = [
 
 [[package]]
 name = "codex-protocol"
-version = "0.0.0"
+version = "0.63.0"
 dependencies = [
  "base64",
  "codex-git",
@@ -961,7 +958,7 @@ dependencies = [
 
 [[package]]
 name = "codex-rmcp-client"
-version = "0.0.0"
+version = "0.63.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1012,7 +1009,7 @@ dependencies = [
 
 [[package]]
 name = "codex-utils-cache"
-version = "0.0.0"
+version = "0.63.0"
 dependencies = [
  "lru",
  "sha1",
@@ -1021,7 +1018,7 @@ dependencies = [
 
 [[package]]
 name = "codex-utils-image"
-version = "0.0.0"
+version = "0.63.0"
 dependencies = [
  "base64",
  "codex-utils-cache",
@@ -1032,7 +1029,7 @@ dependencies = [
 
 [[package]]
 name = "codex-utils-pty"
-version = "0.0.0"
+version = "0.63.0"
 dependencies = [
  "anyhow",
  "portable-pty",
@@ -1041,7 +1038,7 @@ dependencies = [
 
 [[package]]
 name = "codex-utils-readiness"
-version = "0.0.0"
+version = "0.63.0"
 dependencies = [
  "async-trait",
  "thiserror 2.0.17",
@@ -1051,7 +1048,7 @@ dependencies = [
 
 [[package]]
 name = "codex-utils-string"
-version = "0.0.0"
+version = "0.63.0"
 
 [[package]]
 name = "codex-windows-sandbox"
@@ -2675,7 +2672,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mcp-types"
-version = "0.0.0"
+version = "0.63.0"
 dependencies = [
  "schemars 0.8.22",
  "serde",

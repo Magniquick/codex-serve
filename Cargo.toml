@@ -2,6 +2,7 @@
 name = "codex-serve"
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/Magniquick/codex-serve"
 
 [dependencies]
 anyhow = "1.0"
@@ -25,3 +26,8 @@ toml = "0.9.8"
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
