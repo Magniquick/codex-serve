@@ -5,6 +5,8 @@ use tokio::{
     task::{self, JoinHandle},
 };
 
+use codex_app_server_protocol::AuthMode;
+
 use super::{router, state::AppState};
 
 /// Helper for integration tests to run the server in the background.
@@ -23,7 +25,15 @@ impl TestServer {
         Self::spawn_with_state(AppState::insecure_mock(false)).await
     }
 
-    async fn spawn_with_state(state: AppState) -> Result<Self> {
+    pub async fn spawn_with_auth_mode(
+        authenticated: bool,
+        auth_mode: Option<AuthMode>,
+    ) -> Result<Self> {
+        let state = AppState::insecure_mock_with_mode(authenticated, auth_mode);
+        Self::spawn_with_state(state).await
+    }
+
+    pub async fn spawn_with_state(state: AppState) -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let (shutdown_tx, shutdown_rx) = oneshot::channel();

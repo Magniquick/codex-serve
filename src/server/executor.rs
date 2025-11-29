@@ -16,13 +16,14 @@ use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::RwLock;
 use toml::Value as TomlValue;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
+use super::parse_reasoning_variant;
 use crate::{
     error::ApiError,
     openai::chat::PromptPayload,
     prompt::{ensure_web_search_tool, inject_developer_prompt},
-    serve_config::developer_prompt_mode,
+    serve_config::{developer_prompt_mode, verbose_logging_enabled},
     server::response::{AssistantReasoning, ChatCompletionResponse, ToolCall, Usage},
 };
 
@@ -98,20 +99,34 @@ impl RealChatExecutor {
             return Err(ApiError::bad_request("model must be provided"));
         }
 
-        if requested == self.config.model {
+        let (model_override, reasoning_effort) = parse_reasoning_variant(requested)
+            .map(|(base, effort)| (base, Some(effort)))
+            .unwrap_or_else(|| (requested.to_string(), None));
+        if verbose_logging_enabled() && (model_override != requested || reasoning_effort.is_some())
+        {
+            info!(
+                requested_model = %requested,
+                resolved_model = %model_override,
+                reasoning_effort = ?reasoning_effort,
+                "resolved overridden model for upstream request (upstream)"
+            );
+        }
+        let cache_key = requested.to_string();
+
+        if model_override == self.config.model && reasoning_effort.is_none() {
             return Ok(Arc::clone(&self.config));
         }
 
-        if let Some(existing) = self.config_cache.read().await.get(requested) {
+        if let Some(existing) = self.config_cache.read().await.get(&cache_key) {
             return Ok(Arc::clone(existing));
         }
 
         let overrides = ConfigOverrides {
-            model: Some(requested.to_string()),
+            model: Some(model_override.clone()),
             ..ConfigOverrides::default()
         };
 
-        let config = Config::load_with_cli_overrides(self.cli_overrides.clone(), overrides)
+        let mut config = Config::load_with_cli_overrides(self.cli_overrides.clone(), overrides)
             .await
             .map_err(|_| {
                 ApiError::bad_request(format!(
@@ -119,10 +134,15 @@ impl RealChatExecutor {
                      Use `codex config set model {requested}` to enable it."
                 ))
             })?;
+
+        if let Some(effort) = reasoning_effort {
+            config.model_reasoning_effort = Some(effort);
+        }
+
         let config = Arc::new(config);
 
         let mut cache = self.config_cache.write().await;
-        cache.insert(requested.to_string(), Arc::clone(&config));
+        cache.insert(cache_key, Arc::clone(&config));
         Ok(config)
     }
 
@@ -247,9 +267,7 @@ async fn aggregate_response_stream(
                     .push_str(&delta);
             }
             ResponseEvent::ReasoningSummaryPartAdded { summary_index } => {
-                reasoning_summary_parts
-                    .entry(summary_index)
-                    .or_default();
+                reasoning_summary_parts.entry(summary_index).or_default();
             }
             ResponseEvent::Completed {
                 response_id: rid,
@@ -286,7 +304,8 @@ async fn aggregate_response_stream(
     } else {
         "stop"
     };
-    let reasoning_summary = reasoning_summary_parts.into_values()
+    let reasoning_summary = reasoning_summary_parts
+        .into_values()
         .filter(|text| !text.trim().is_empty())
         .collect::<Vec<_>>();
     let reasoning = AssistantReasoning::from_summary_parts(reasoning_summary);

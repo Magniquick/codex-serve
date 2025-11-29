@@ -1,3 +1,4 @@
+use codex_app_server_protocol::AuthMode;
 use codex_common::model_presets::builtin_model_presets;
 use codex_serve::server::TestServer;
 use reqwest::StatusCode;
@@ -197,4 +198,39 @@ async fn api_show_requires_model() {
         .expect("request should reach Codex Serve");
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_accepts_reasoning_suffix_for_chatgpt_auth() {
+    let server = TestServer::spawn_with_auth_mode(true, Some(AuthMode::ChatGPT))
+        .await
+        .expect("Codex Serve test server should start");
+
+    let client = reqwest::Client::new();
+    let url = format!("{}/v1/chat/completions", server.base_url());
+    let response = client
+        .post(url)
+        .json(&serde_json::json!({
+            "model": "gpt-5.1-codex-max-low",
+            "messages": [
+                {"role": "user", "content": "hello"}
+            ]
+        }))
+        .send()
+        .await
+        .expect("request should reach Codex Serve");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body: Value = response.json().await.expect("response must be JSON");
+    assert_eq!(
+        body.get("model").and_then(Value::as_str),
+        Some("gpt-5.1-codex-max-low")
+    );
+    assert!(
+        extract_message_content(&body)
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty()),
+        "assistant reply text should be present"
+    );
 }

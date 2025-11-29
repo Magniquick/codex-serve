@@ -29,12 +29,14 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use codex_app_server_protocol::AuthMode;
 use codex_common::model_presets::{ModelPreset, builtin_model_presets};
 use codex_core::{
     ResponseEvent, ResponseItem, compact::content_items_to_text,
     protocol_config_types::ReasoningEffort,
 };
 use codex_protocol::models::WebSearchAction;
+use strum::IntoEnumIterator;
 
 use crate::{
     error::ApiError,
@@ -93,11 +95,18 @@ async fn chat_completions(
         if verbose_logging_enabled() {
             info!(
                 model = %prompt_payload.model,
-                "forwarding streaming chat request to Codex"
+                "forwarding streaming chat request to Codex (upstream)"
             );
         }
         let stream = stream_chat_response(state.engine(), prompt_payload).await?;
         return Ok(stream.into_response());
+    }
+
+    if verbose_logging_enabled() {
+        info!(
+            model = %prompt_payload.model,
+            "forwarding chat request to Codex (upstream)"
+        );
     }
 
     let response = state.engine().complete(prompt_payload).await?;
@@ -129,11 +138,12 @@ async fn healthz(State(state): State<AppState>) -> Json<HealthzResponse> {
         "Codex auth missing; run `codex login`".to_string()
     };
     let expose_reasoning = expose_reasoning_models();
+    let auth_mode = state.auth_mode();
     let config = HealthzConfig {
         expose_reasoning_models: expose_reasoning,
         web_search_request: state.web_search_enabled(),
         developer_prompt_mode: developer_prompt_mode().to_string(),
-        models: codex_model_ids(expose_reasoning),
+        models: codex_model_ids(expose_reasoning, auth_mode),
     };
     Json(HealthzResponse {
         ok: true,
@@ -155,9 +165,9 @@ struct ModelEntry {
     object: &'static str,
 }
 
-async fn list_models() -> Json<ModelsResponse> {
+async fn list_models(State(state): State<AppState>) -> Json<ModelsResponse> {
     let include_reasoning = expose_reasoning_models();
-    let data = codex_model_ids(include_reasoning)
+    let data = codex_model_ids(include_reasoning, state.auth_mode())
         .into_iter()
         .map(|id| ModelEntry {
             id,
@@ -235,8 +245,8 @@ struct OllamaShowRequest {
     model: Option<String>,
 }
 
-async fn api_tags() -> Json<OllamaTagsResponse> {
-    let models = codex_model_ids(expose_reasoning_models());
+async fn api_tags(State(state): State<AppState>) -> Json<OllamaTagsResponse> {
+    let models = codex_model_ids(expose_reasoning_models(), state.auth_mode());
     let entries = models
         .iter()
         .map(|model_id| build_ollama_entry(model_id))
@@ -255,11 +265,11 @@ fn build_ollama_entry(model_id: &str) -> OllamaModelEntry {
     }
 }
 
-fn codex_model_ids(include_reasoning_variants: bool) -> Vec<String> {
+fn codex_model_ids(include_reasoning_variants: bool, auth_mode: Option<AuthMode>) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut models = Vec::new();
 
-    for preset in builtin_model_presets(None) {
+    for preset in builtin_model_presets(auth_mode) {
         push_unique_model(&mut models, &mut seen, preset.model.to_string());
         if include_reasoning_variants {
             for variant in reasoning_variants_for_preset(&preset) {
@@ -291,6 +301,16 @@ fn reasoning_suffix(effort: ReasoningEffort) -> Option<String> {
         return None;
     }
     Some(effort.to_string())
+}
+
+fn parse_reasoning_variant(model: &str) -> Option<(String, ReasoningEffort)> {
+    let trimmed = model.trim();
+    let (base, suffix) = trimmed.rsplit_once('-')?;
+    let normalized_suffix = suffix.to_ascii_lowercase();
+
+    ReasoningEffort::iter()
+        .find(|effort| effort.to_string().eq_ignore_ascii_case(&normalized_suffix))
+        .map(|effort| (base.to_string(), effort))
 }
 
 fn log_verbose_json<T>(event: &str, value: &T)
@@ -853,4 +873,27 @@ async fn log_requests(request: Request<Body>, next: Next) -> Result<Response, In
         );
     }
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chatgpt_auth_exposes_reasoning_variants() {
+        let models = codex_model_ids(true, Some(AuthMode::ChatGPT));
+
+        assert!(models.iter().any(|m| m == "gpt-5.1-codex-max"));
+        assert!(models.iter().any(|m| m.ends_with("-low")));
+        assert!(models.iter().any(|m| m.ends_with("-high")));
+    }
+
+    #[test]
+    fn parses_reasoning_variant_when_present() {
+        let parsed = parse_reasoning_variant("gpt-5.1-codex-max-low")
+            .expect("expected reasoning variant to parse");
+        assert_eq!(parsed.0, "gpt-5.1-codex-max".to_string());
+        assert_eq!(parsed.1, ReasoningEffort::Low);
+        assert_eq!(parse_reasoning_variant("gpt-5.1"), None);
+    }
 }

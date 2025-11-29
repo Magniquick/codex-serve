@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use codex_app_server_protocol::AuthMode;
 use codex_core::{
     auth::{AuthCredentialsStoreMode, AuthManager},
     config::{Config, ConfigOverrides, find_codex_home},
@@ -55,8 +56,15 @@ impl AppState {
 
     /// Test-only constructor that avoids hitting the real Codex CLI.
     pub fn insecure_mock(authenticated: bool) -> Self {
+        Self::insecure_mock_with_mode(authenticated, None)
+    }
+
+    pub fn insecure_mock_with_mode(authenticated: bool, auth_mode: Option<AuthMode>) -> Self {
         Self {
-            auth: AuthController::Mock { authenticated },
+            auth: AuthController::Mock {
+                authenticated,
+                mode: auth_mode,
+            },
             engine: Arc::new(MockChatExecutor::new()),
             web_search_enabled: false,
         }
@@ -81,6 +89,10 @@ impl AppState {
         &self.auth
     }
 
+    pub fn auth_mode(&self) -> Option<AuthMode> {
+        self.auth.auth_mode()
+    }
+
     pub fn web_search_enabled(&self) -> bool {
         self.web_search_enabled
     }
@@ -89,14 +101,33 @@ impl AppState {
 #[derive(Clone)]
 pub enum AuthController {
     Real(Arc<AuthManager>),
-    Mock { authenticated: bool },
+    Mock {
+        authenticated: bool,
+        mode: Option<AuthMode>,
+    },
 }
 
 impl AuthController {
     pub fn is_authenticated(&self) -> bool {
         match self {
             Self::Real(manager) => manager.auth().is_some(),
-            Self::Mock { authenticated } => *authenticated,
+            Self::Mock { authenticated, .. } => *authenticated,
+        }
+    }
+
+    pub fn auth_mode(&self) -> Option<AuthMode> {
+        match self {
+            Self::Real(manager) => manager.auth().map(|auth| auth.mode),
+            Self::Mock {
+                authenticated,
+                mode,
+            } => {
+                if *authenticated {
+                    *mode
+                } else {
+                    None
+                }
+            }
         }
     }
 }
